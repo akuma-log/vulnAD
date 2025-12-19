@@ -1,5 +1,10 @@
 # VulnAD
 
+## Before run the script (you have to install AD Manually)
+```
+Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
+```
+
 # What this script does:
 ```
 Sets up a complete Active Directory lab with domain "onepiece.local"
