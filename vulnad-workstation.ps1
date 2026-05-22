@@ -1,28 +1,62 @@
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
-
 # =====================================================================
 # OnePiece AD Lab - Workstation setup (Win10 / Win11)
 #
 # Usage:
-#   1. Set $DCIPAddress below to your DC's IP.
-#   2. Run from elevated PowerShell on the workstation.
-#   3. Reboots automatically after domain join.
-#   4. After reboot, sign in as onepiece\luffy.m / Password123! and
-#      re-run with -Phase Post to plant local vulns (cached creds,
-#      unquoted service path, local admin reuse).
+#   .\vulnad-workstation.ps1                    # prompts for DC IP
+#   .\vulnad-workstation.ps1 -DCIP 192.168.56.10
+#   .\vulnad-workstation.ps1 -Phase Post        # post-reboot vuln planting
+#
+# After domain join the VM reboots. Sign in as onepiece\luffy.m /
+# Password123! and re-run (the DC IP is cached so no re-prompt).
 # =====================================================================
 
 param(
     [ValidateSet('Join','Post','All')]
-    [string]$Phase = 'All'
+    [string]$Phase = 'All',
+
+    [string]$DCIP,
+    [string]$Domain          = "onepiece.local",
+    [string]$NewComputerName = "WS01",
+    [string]$JoinUser        = "onepiece\luffy.m",
+    [string]$JoinPassword    = "Password123!"
 )
 
-$Global:Domain          = "onepiece.local"
-$Global:NewComputerName = "WS01"
-$Global:DCIPAddress     = "192.168.56.10"   # <-- EDIT ME
-$Global:JoinUser        = "onepiece\luffy.m"
-$Global:JoinPassword    = "Password123!"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+$Global:Domain          = $Domain
+$Global:NewComputerName = $NewComputerName
+$Global:JoinUser        = $JoinUser
+$Global:JoinPassword    = $JoinPassword
+
+function Read-DCIP {
+    param([string]$Provided)
+
+    # Saved from a previous run (so Post phase doesn't re-prompt after reboot)
+    $cacheFile = "$env:ProgramData\vulnad-dcip.txt"
+
+    if ($Provided) { $ip = $Provided }
+    elseif (Test-Path $cacheFile) { $ip = (Get-Content $cacheFile -Raw).Trim() }
+    else { $ip = $null }
+
+    while (-not $ip -or $ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        if ($ip) { Write-Host "[-] '$ip' is not a valid IPv4 address." -ForegroundColor Red }
+        $ip = (Read-Host "Enter DC01 IP address").Trim()
+    }
+
+    Write-Host "[*] Testing reachability to $ip ..." -ForegroundColor Gray
+    if (-not (Test-Connection -ComputerName $ip -Count 2 -Quiet)) {
+        Write-Host "[-] $ip did not respond to ping. Continue anyway? (y/N) " -ForegroundColor Yellow -NoNewline
+        if ((Read-Host) -ne 'y') { exit 1 }
+    } else {
+        Write-Host "[+] $ip is reachable" -ForegroundColor Green
+    }
+
+    Set-Content -Path $cacheFile -Value $ip -Force
+    return $ip
+}
+
+$Global:DCIPAddress = Read-DCIP -Provided $DCIP
 
 function Write-Good { param($s) Write-Host "[+] $s" -ForegroundColor Green }
 function Write-Bad  { param($s) Write-Host "[-] $s" -ForegroundColor Red }
