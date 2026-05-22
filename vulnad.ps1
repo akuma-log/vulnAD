@@ -716,9 +716,22 @@ function Install-ADCS {
         Write-Info "Configuring Web Enrollment (ESC8)..."
         try {
             Install-AdcsWebEnrollment -Force -Confirm:$false -ErrorAction Stop
-            Write-Good "Web Enrollment configured at http://$env:COMPUTERNAME/certsrv (ESC8 vulnerable)"
+            Write-Good "Web Enrollment configured at http://$env:COMPUTERNAME/certsrv"
         } catch {
             Write-Info "Web Enrollment may already be configured: $_"
+        }
+
+        # IIS ships /certsrv with Require-SSL on, which blocks plain HTTP NTLM
+        # auth. Turn it off so the endpoint is actually ESC8-relayable.
+        Write-Info "Disabling Require-SSL on /certsrv for ESC8..."
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            Set-WebConfigurationProperty -PSPath 'IIS:\Sites\Default Web Site\CertSrv' `
+                -Filter 'system.webServer/security/access' -Name 'sslFlags' -Value 'None' -ErrorAction Stop
+            iisreset 2>&1 | Out-Null
+            Write-Good "/certsrv now accepts HTTP NTLM (ESC8 relay-ready)"
+        } catch {
+            Write-Info "Could not disable /certsrv SSL flag: $_"
         }
         
         # Configure all vulnerable settings
