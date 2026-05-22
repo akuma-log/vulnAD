@@ -345,6 +345,7 @@ function Create-EssentialGroups {
         @{Name="Marine Admirals"; Scope="Global"},
         @{Name="Pirate Emperors"; Scope="Global"},
         @{Name="Warlords of the Sea"; Scope="Global"},
+        @{Name="Supernovas"; Scope="Global"},
         @{Name="Domain Admins"; Scope="Global"},
         @{Name="Enterprise Admins"; Scope="Global"},
         @{Name="Schema Admins"; Scope="Global"},
@@ -915,9 +916,6 @@ function Configure-ADCS-AdvancedVulns {
         Write-Good "ESC16: szOID_NTDS_CA_SECURITY_EXT disabled CA-wide"
     } catch { Write-Info "ESC16 setreg failed: $_" }
 
-    # Vulnerable ACL paths for BloodHound -- these are the real attack graph
-    Create-VulnerableACLs
-
     Show-ADCS-VulnerabilitySummary
     Write-Good "Advanced vulnerabilities configured"
 }
@@ -1107,8 +1105,10 @@ function Enable-LDAPAnonymousBind {
         Set-ADObject -Identity $dsh -Replace @{dsHeuristics = (-join $chars)}
         Write-Good "dsHeuristics: anonymous LDAP bind enabled"
 
-        Add-ADGroupMember -Identity "Pre-Windows 2000 Compatible Access" -Members "Authenticated Users" -ErrorAction SilentlyContinue
-        Write-Good "Authenticated Users -> Pre-Windows 2000 Compatible Access"
+        # "Authenticated Users" is a well-known SID and can't be resolved by name.
+        $authUsersSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-11'
+        Add-ADGroupMember -Identity "Pre-Windows 2000 Compatible Access" -Members $authUsersSid -ErrorAction SilentlyContinue
+        Write-Good "Authenticated Users (S-1-5-11) -> Pre-Windows 2000 Compatible Access"
     } catch {
         Write-Info "LDAP anon / Pre-Win2K failed: $_"
     }
@@ -1387,24 +1387,40 @@ function Show-SetupSummary {
     Write-Host "Domain Controller: $env:COMPUTERNAME" -ForegroundColor Yellow
     
     Write-Host "`n--- Created Objects ---" -ForegroundColor Cyan
-    Write-Host "Users: 20 OnePiece character accounts" -ForegroundColor White
-    Write-Host "Groups: 8 security groups" -ForegroundColor White
+    Write-Host "Users: 24 OnePiece character accounts" -ForegroundColor White
+    Write-Host "Groups: 9 security groups" -ForegroundColor White
     Write-Host "OUs: 9 organizational units" -ForegroundColor White
-    Write-Host "Service Accounts: 3 (merry_svc, cifs_svc, http_svc)" -ForegroundColor White
-    
+    Write-Host "Service Accounts: 6 (merry_svc, cifs_svc, http_svc, sql_svc, backup_svc, helpdesk_svc)" -ForegroundColor White
+    Write-Host "Computer: FILES01 (RBCD target)" -ForegroundColor White
+    Write-Host "gMSA: gmsa_sql (kid.e can read password)" -ForegroundColor White
+
     Write-Host "`n--- Vulnerability Targets ---" -ForegroundColor Cyan
-    Write-Host "AS-REP Roasting: enel.g, shirahoshi, bonclay.b" -ForegroundColor Yellow
-    Write-Host "Unconstrained Delegation: franky.c, brook.b" -ForegroundColor Yellow
-    Write-Host "Kerberoasting: merry_svc, cifs_svc, http_svc" -ForegroundColor Yellow
-    Write-Host "DnsAdmins: enel.g, shirahoshi" -ForegroundColor Yellow
-    
+    Write-Host "AS-REP Roasting:           enel.g, shirahoshi, bonclay.b" -ForegroundColor Yellow
+    Write-Host "Unconstrained Delegation:  franky.c, brook.b" -ForegroundColor Yellow
+    Write-Host "Constrained Delegation:    nami.n -> CIFS/DC01 (protocol transition)" -ForegroundColor Yellow
+    Write-Host "RBCD:                      usopp.u -> FILES01`$" -ForegroundColor Yellow
+    Write-Host "Kerberoasting:             merry_svc, cifs_svc, http_svc, sql_svc" -ForegroundColor Yellow
+    Write-Host "DCSync (non-DA):           bonclay.b" -ForegroundColor Yellow
+    Write-Host "DnsAdmins:                 enel.g, shirahoshi" -ForegroundColor Yellow
+    Write-Host "LAPS / gMSA Read:          kid.e" -ForegroundColor Yellow
+    Write-Host "Weak/sprayable passwords:  roger.g, rayleigh.s, garp.m, smoker.c" -ForegroundColor Yellow
+
     Write-Host "`n--- AD CS Vulnerabilities ---" -ForegroundColor Cyan
-    Write-Host "ESC1-ESC16: Multiple certificate service vulnerabilities" -ForegroundColor Yellow
+    Write-Host "ESC1, ESC6, ESC8, ESC9, ESC10, ESC11, ESC15, ESC16 + Certifried" -ForegroundColor Yellow
     Write-Host "Web Enrollment: http://$env:COMPUTERNAME/certsrv" -ForegroundColor Yellow
-    
+
+    Write-Host "`n--- Domain-wide Misconfigs ---" -ForegroundColor Cyan
+    Write-Host "SMB signing off, LDAP anonymous bind, Pre-Win2K compat" -ForegroundColor Yellow
+    Write-Host "MachineAccountQuota = 20, Spooler on, EFS on (PetitPotam)" -ForegroundColor Yellow
+    Write-Host "ADIDNS wildcard *.onepiece.local, GPP cpassword in SYSVOL" -ForegroundColor Yellow
+    Write-Host "Loot share: \\$env:COMPUTERNAME\Public" -ForegroundColor Yellow
+
     Write-Host "`n--- Test Credentials ---" -ForegroundColor Cyan
-    Write-Host "Domain Admin: luffy.m / Password123!" -ForegroundColor White
-    Write-Host "All users: PasswordXXX! format (see script for details)" -ForegroundColor White
+    Write-Host "Domain Admin:   luffy.m / Password123!" -ForegroundColor White
+    Write-Host "Weak pwd DA:    roger.g / Changeme123!" -ForegroundColor White
+    Write-Host "DCSync user:    bonclay.b / Password777!" -ForegroundColor White
+    Write-Host "LAPS/gMSA read: kid.e / Password222!" -ForegroundColor White
+    Write-Host "Full list:      see README.md credentials table" -ForegroundColor White
     
     Write-Host "`n--- Verification Commands ---" -ForegroundColor Cyan
     Write-Host "Get-ADUser -Filter * | Select-Object SamAccountName" -ForegroundColor Gray
