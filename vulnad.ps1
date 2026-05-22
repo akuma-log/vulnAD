@@ -345,7 +345,9 @@ function Create-EssentialGroups {
         @{Name="Marine Admirals"; Scope="Global"},
         @{Name="Pirate Emperors"; Scope="Global"},
         @{Name="Warlords of the Sea"; Scope="Global"},
-        @{Name="Supernovas"; Scope="Global"},
+        # Supernovas is created under CN=Users to avoid colliding with the
+        # OU=Supernovas object (AD enforces unique 'name' per parent).
+        @{Name="Supernovas"; Scope="Global"; Path="CN=Users,DC=onepiece,DC=local"},
         @{Name="Domain Admins"; Scope="Global"},
         @{Name="Enterprise Admins"; Scope="Global"},
         @{Name="Schema Admins"; Scope="Global"},
@@ -359,9 +361,10 @@ function Create-EssentialGroups {
         try {
             $exists = Get-ADGroup -Filter "Name -eq '$($group.Name)'" -ErrorAction SilentlyContinue
             if (-not $exists) {
-                New-ADGroup -Name $group.Name -GroupScope $group.Scope -GroupCategory Security -Path "DC=onepiece,DC=local" -ErrorAction SilentlyContinue
+                $groupPath = if ($group.Path) { $group.Path } else { "DC=onepiece,DC=local" }
+                New-ADGroup -Name $group.Name -GroupScope $group.Scope -GroupCategory Security -Path $groupPath -ErrorAction SilentlyContinue
                 $createdCount++
-                Write-Info "Created group: $($group.Name)"
+                Write-Info "Created group: $($group.Name) in $groupPath"
             } else {
                 $existingCount++
                 Write-Info "Group already exists: $($group.Name)"
@@ -722,12 +725,16 @@ function Install-ADCS {
         }
 
         # IIS ships /certsrv with Require-SSL on, which blocks plain HTTP NTLM
-        # auth. Turn it off so the endpoint is actually ESC8-relayable.
+        # auth. The system.webServer/security/access section is locked at the
+        # applicationHost.config level, so Set-WebConfigurationProperty fails
+        # with "section locked". Use appcmd with /commit:apphost which writes
+        # straight to applicationHost.config and bypasses the lock.
         Write-Info "Disabling Require-SSL on /certsrv for ESC8..."
+        $appcmd = "$env:windir\system32\inetsrv\appcmd.exe"
         try {
-            Import-Module WebAdministration -ErrorAction Stop
-            Set-WebConfigurationProperty -PSPath 'IIS:\Sites\Default Web Site\CertSrv' `
-                -Filter 'system.webServer/security/access' -Name 'sslFlags' -Value 'None' -ErrorAction Stop
+            & $appcmd set config "Default Web Site/CertSrv" `
+                -section:"system.webServer/security/access" `
+                /sslFlags:"None" /commit:apphost 2>&1 | Out-Null
             iisreset 2>&1 | Out-Null
             Write-Good "/certsrv now accepts HTTP NTLM (ESC8 relay-ready)"
         } catch {
