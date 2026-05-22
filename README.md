@@ -1,8 +1,10 @@
 # VulnAD — OnePiece Active Directory Lab
 
-A purposely-vulnerable Active Directory lab for practicing AD pentesting. Two-VM setup: **Windows Server 2025 DC** + **Windows 10/11 workstation**.
+A purposely-vulnerable Active Directory lab for practicing AD pentesting. Two-VM setup: **Windows Server 2025 DC** + **Windows 10/11 workstation**. Hands you the full modern AD attack surface — AS-REP, Kerberoast, DCSync (non-DA), ESC1–ESC16 cert template abuse, BloodHound ACL paths, constrained / RBCD delegation, LAPS / gMSA reads, GPP cpassword, PetitPotam, shadow credentials, MSSQL linked servers — on two VMs that fit in 8 GB of RAM.
 
 > ⚠️ Run **only** in an isolated lab network. Never on a production domain or anything reachable from the internet.
+
+> 📖 **New here?** Set up the lab below, then follow [**WRITEUP.md**](WRITEUP.md) — a 20-minute walkthrough from "I have an IP" to "I have krbtgt." All commands run against the real lab; outputs are real.
 
 ---
 
@@ -86,6 +88,8 @@ You don't need to pre-install AD-Domain-Services — the script does it.
 ---
 
 ## Attack Paths
+
+> If you'd rather follow a narrative walkthrough than a reference list, jump to [**WRITEUP.md**](WRITEUP.md). It chains paths 1–9 below into one continuous compromise.
 
 ### 1. Password Spraying
 Reused weak passwords across multiple users.
