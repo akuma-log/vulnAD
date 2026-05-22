@@ -14,6 +14,72 @@ function Write-Info { param( $String ) Write-Host "[*]" $String -ForegroundColor
 # CORE INSTALLATION FUNCTIONS - FIXED
 # ============================================
 
+function Configure-StaticIP {
+    Write-Info "Checking network configuration..."
+
+    # Find the active adapter (one with a default gateway, status Up)
+    $iface = Get-NetIPConfiguration | Where-Object {
+        $_.IPv4DefaultGateway -ne $null -and $_.NetAdapter.Status -eq 'Up'
+    } | Select-Object -First 1
+
+    if (-not $iface) {
+        Write-Bad "No active network adapter with a gateway found. Configure networking manually first."
+        return $false
+    }
+
+    $alias = $iface.InterfaceAlias
+    $idx   = $iface.InterfaceIndex
+
+    # Already static? skip silently
+    $ipObj = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 |
+             Where-Object { $_.IPAddress -notlike '169.*' } | Select-Object -First 1
+    if ($ipObj -and $ipObj.PrefixOrigin -eq 'Manual') {
+        Write-Good "Static IP already configured: $($ipObj.IPAddress)/$($ipObj.PrefixLength) on $alias"
+        # Still ensure DNS points at loopback for the DC
+        Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses 127.0.0.1 -ErrorAction SilentlyContinue
+        return $true
+    }
+
+    Write-Info "Current adapter: $alias"
+    Write-Info "Current IP:      $($ipObj.IPAddress)/$($ipObj.PrefixLength)"
+    Write-Info "Current gateway: $($iface.IPv4DefaultGateway.NextHop)"
+
+    $defIp     = $ipObj.IPAddress
+    $defPrefix = $ipObj.PrefixLength
+    $defGw     = $iface.IPv4DefaultGateway.NextHop
+
+    Write-Host ""
+    Write-Host "Press Enter to keep the current value, or type a new one." -ForegroundColor Yellow
+    $ip     = (Read-Host "IP address      [$defIp]").Trim();      if (-not $ip)     { $ip = $defIp }
+    $prefix = (Read-Host "Prefix length   [$defPrefix]").Trim();  if (-not $prefix) { $prefix = $defPrefix }
+    $gw     = (Read-Host "Default gateway [$defGw]").Trim();      if (-not $gw)     { $gw = $defGw }
+
+    if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        Write-Bad "Invalid IP: $ip"
+        return $false
+    }
+
+    try {
+        Write-Info "Applying static IP $ip/$prefix gw=$gw on $alias ..."
+        # Remove existing IP/gateway first so New-NetIPAddress doesn't conflict
+        Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike '169.*' } |
+            Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        Get-NetRoute -InterfaceIndex $idx -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+
+        New-NetIPAddress -InterfaceIndex $idx -IPAddress $ip -PrefixLength $prefix -DefaultGateway $gw -ErrorAction Stop | Out-Null
+        Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses 127.0.0.1
+        Write-Good "Static IP set. DNS -> 127.0.0.1"
+        Start-Sleep -Seconds 3
+        return $true
+    } catch {
+        Write-Bad "Failed to set static IP: $_"
+        Write-Info "Configure manually with New-NetIPAddress and re-run."
+        return $false
+    }
+}
+
 function Rename-ComputerToDC01 {
     Write-Info "Setting computer name to DC01..."
     
@@ -1187,6 +1253,10 @@ function Invoke-OnePieceSetup {
         return
     }
     
+    # Ensure static IP + DNS=127.0.0.1 BEFORE rename/promotion.
+    # Skips silently if already static.
+    Configure-StaticIP | Out-Null
+
     # FORCE RENAME TO DC01 - Add this check at the very beginning
     if ($env:COMPUTERNAME -ne "DC01") {
         Write-Info "Current computer name is $($env:COMPUTERNAME). Renaming to DC01..."
