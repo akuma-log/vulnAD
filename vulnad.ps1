@@ -6,9 +6,13 @@ $Global:Domain = "onepiece.local"
 $Global:NetbiosName = "ONEPIECE"
 $Global:SourcePath = "D:\sources\sxs"  # Set this to Windows installation media path if needed
 
+# Flip this to $true (or set $env:VULNAD_VERBOSE='1') to see all the
+# intermediate "doing X..." chatter. Off by default for a clean log.
+$Global:VulnadVerbose = ($env:VULNAD_VERBOSE -eq '1')
+
 function Write-Good { param( $String ) Write-Host "[+]" $String -ForegroundColor 'Green'}
 function Write-Bad  { param( $String ) Write-Host "[-]" $String -ForegroundColor 'Red'}
-function Write-Info { param( $String ) Write-Host "[*]" $String -ForegroundColor 'Gray'}
+function Write-Info { param( $String ) if ($Global:VulnadVerbose) { Write-Host "[*]" $String -ForegroundColor 'Gray' } }
 
 # ============================================
 # CORE INSTALLATION FUNCTIONS - FIXED
@@ -1350,9 +1354,10 @@ function Invoke-OnePieceSetup {
             # Configure-ADCS-AdvancedVulns is called from inside Install-ADCS
         )
         
+        $i = 0
         foreach ($step in $steps) {
-            Write-Host ""
-            Write-Info "$($step.Name)..."
+            $i++
+            Write-Host ("`n[{0,2}/{1}] {2}" -f $i, $steps.Count, $step.Name) -ForegroundColor Cyan
             & $step.Action | Out-Null
         }
         
