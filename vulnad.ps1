@@ -577,12 +577,12 @@ function Install-ADCS {
     if ($caInstalled) {
         Write-Good "AD CS Certificate Authority is already running"
         Write-Info "Configuring vulnerable settings on existing CA..."
-        
-        # Configure vulnerable settings on existing CA
+
         Configure-ADCS-VulnerableSettings
         Create-VulnerableCertificateTemplates
+        Disable-CertSrvRequireSSL
         Configure-ADCS-AdvancedVulns
-        
+
         return $true
     }
     
@@ -599,6 +599,7 @@ function Install-ADCS {
                 Write-Good "CA service started successfully"
                 Configure-ADCS-VulnerableSettings
                 Create-VulnerableCertificateTemplates
+                Disable-CertSrvRequireSSL
                 Configure-ADCS-AdvancedVulns
                 return $true
             }
@@ -724,22 +725,7 @@ function Install-ADCS {
             Write-Info "Web Enrollment may already be configured: $_"
         }
 
-        # IIS ships /certsrv with Require-SSL on, which blocks plain HTTP NTLM
-        # auth. The system.webServer/security/access section is locked at the
-        # applicationHost.config level, so Set-WebConfigurationProperty fails
-        # with "section locked". Use appcmd with /commit:apphost which writes
-        # straight to applicationHost.config and bypasses the lock.
-        Write-Info "Disabling Require-SSL on /certsrv for ESC8..."
-        $appcmd = "$env:windir\system32\inetsrv\appcmd.exe"
-        try {
-            & $appcmd set config "Default Web Site/CertSrv" `
-                -section:"system.webServer/security/access" `
-                /sslFlags:"None" /commit:apphost 2>&1 | Out-Null
-            iisreset 2>&1 | Out-Null
-            Write-Good "/certsrv now accepts HTTP NTLM (ESC8 relay-ready)"
-        } catch {
-            Write-Info "Could not disable /certsrv SSL flag: $_"
-        }
+        Disable-CertSrvRequireSSL
         
         # Configure all vulnerable settings
         Configure-ADCS-VulnerableSettings
@@ -767,6 +753,28 @@ function Install-ADCS {
         Configure-ADCS-AdvancedVulns
         
         return $false
+    }
+}
+
+function Disable-CertSrvRequireSSL {
+    # IIS ships /certsrv with Require-SSL on, which returns 403.4 to plain HTTP
+    # NTLM auth and breaks ntlmrelayx --adcs. The section is locked at the
+    # applicationHost level, so Set-WebConfigurationProperty fails. appcmd with
+    # /commit:apphost writes straight to applicationHost.config (bypasses lock).
+    Write-Info "Disabling Require-SSL on /certsrv for ESC8..."
+    $appcmd = "$env:windir\system32\inetsrv\appcmd.exe"
+    if (-not (Test-Path $appcmd)) {
+        Write-Info "appcmd not found -- IIS may not be installed yet, skipping"
+        return
+    }
+    try {
+        & $appcmd set config "Default Web Site/CertSrv" `
+            -section:"system.webServer/security/access" `
+            /sslFlags:"None" /commit:apphost 2>&1 | Out-Null
+        iisreset 2>&1 | Out-Null
+        Write-Good "/certsrv now accepts HTTP NTLM (ESC8 relay-ready)"
+    } catch {
+        Write-Info "Could not disable /certsrv SSL flag: $_"
     }
 }
 
@@ -1125,10 +1133,26 @@ function Enable-LDAPAnonymousBind {
         Set-ADObject -Identity $dsh -Replace @{dsHeuristics = (-join $chars)}
         Write-Good "dsHeuristics: anonymous LDAP bind enabled"
 
-        # "Authenticated Users" is a well-known SID and can't be resolved by name.
-        $authUsersSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-11'
-        Add-ADGroupMember -Identity "Pre-Windows 2000 Compatible Access" -Members $authUsersSid -ErrorAction SilentlyContinue
-        Write-Good "Authenticated Users (S-1-5-11) -> Pre-Windows 2000 Compatible Access"
+        # "Authenticated Users" (S-1-5-11) is a well-known SID with no AD
+        # object behind it, so Add-ADGroupMember can't resolve it.
+        # Bind to the group via ADSI and add the binary SID directly.
+        $domainDN = (Get-ADDomain).DistinguishedName
+        $grpDN    = "CN=Pre-Windows 2000 Compatible Access,CN=Builtin,$domainDN"
+        $grp      = [ADSI]"LDAP://$grpDN"
+
+        $sid       = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-11'
+        $sidBytes  = New-Object byte[] $sid.BinaryLength
+        $sid.GetBinaryForm($sidBytes, 0)
+        $sidHex    = ($sidBytes | ForEach-Object { $_.ToString("X2") }) -join ""
+
+        try {
+            $grp.Add("LDAP://<SID=$sidHex>")
+            Write-Good "Authenticated Users (S-1-5-11) -> Pre-Windows 2000 Compatible Access"
+        } catch {
+            if ($_.Exception.Message -match "object already exists|attribute or value exists") {
+                Write-Info "Authenticated Users already in Pre-Win2K group"
+            } else { throw }
+        }
     } catch {
         Write-Info "LDAP anon / Pre-Win2K failed: $_"
     }
@@ -1338,8 +1362,8 @@ function Invoke-OnePieceSetup {
             @{Name="GPP cpassword in SYSVOL"; Action={Create-GPPCpassword}},
             @{Name="File Share Loot"; Action={Create-FileShareLoot}},
             @{Name="Installing AD CS"; Action={Install-ADCS}},
-            @{Name="Certifried Template"; Action={Create-CertifriedTemplate}},
-            @{Name="Configuring Advanced AD CS Vulns"; Action={Configure-ADCS-AdvancedVulns}}
+            @{Name="Certifried Template"; Action={Create-CertifriedTemplate}}
+            # Configure-ADCS-AdvancedVulns is called from inside Install-ADCS
         )
         
         foreach ($step in $steps) {
