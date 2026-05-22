@@ -29,16 +29,23 @@ A purposely-vulnerable Active Directory lab for practicing AD pentesting. Two-VM
 
 ### 1. Domain Controller (Win Server 2025)
 
+**Before first run** — set a static IP (the DC's IP cannot change once promoted):
 ```powershell
-# As Administrator
-Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress 192.168.56.10 -PrefixLength 24 -DefaultGateway 192.168.56.1
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses 127.0.0.1
+```
+
+Then run the script from elevated PowerShell:
+```powershell
 .\vulnad.ps1
 ```
 
-The script will:
-- Rename to `DC01` and reboot.
-- Promote to DC for `onepiece.local` and reboot.
-- Populate users / groups / OUs / vulns. **Run again after each reboot** until you see the final summary.
+The script handles everything itself across three runs (it reboots between phases):
+- **Run 1**: renames host to `DC01` → reboots.
+- **Run 2**: installs AD DS, promotes to DC for `onepiece.local` → reboots.
+- **Run 3**: populates users / groups / OUs / vulns / AD CS / loot. Watch for the final summary.
+
+You don't need to pre-install AD-Domain-Services — the script does it.
 
 ### 2. Workstation (Win 10 / Win 11)
 
