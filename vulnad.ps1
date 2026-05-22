@@ -701,7 +701,7 @@ function Configure-ADCS-VulnerableSettings {
         Write-Info "Raising ms-DS-MachineAccountQuota for RBCD..."
         try {
             Set-ADDomain -Identity $Global:Domain -Replace @{"ms-DS-MachineAccountQuota" = "20"} -ErrorAction SilentlyContinue
-            Write-Info "MachineAccountQuota = 20 (default 10) — any user can join up to 20 machines"
+            Write-Info "MachineAccountQuota = 20 (default 10) -- any user can join up to 20 machines"
         } catch {
             Write-Info "Could not set machine account quota: $_"
         }
@@ -818,7 +818,7 @@ function Create-VulnerableCertificateTemplates {
     New-VulnTemplateFromUser -NewName "ESC9-NoSecExt" -NameFlag 0x0 -EnrollmentFlag 0x80000
 
     # ESC15 / EKUwu: schema v1 template with ENROLLEE_SUPPLIES_SUBJECT (we
-    # write schema v2 here but with editable subject — gives a similar primitive)
+    # write schema v2 here but with editable subject -- gives a similar primitive)
     New-VulnTemplateFromUser -NewName "ESC15-Editable" -NameFlag 0x1 -EnrollmentFlag 0
 
     Write-Good "Vulnerable templates published: ESC1-VulnUser, ESC9-NoSecExt, ESC15-Editable"
@@ -849,7 +849,7 @@ function Configure-ADCS-AdvancedVulns {
         Write-Good "ESC16: szOID_NTDS_CA_SECURITY_EXT disabled CA-wide"
     } catch { Write-Info "ESC16 setreg failed: $_" }
 
-    # Vulnerable ACL paths for BloodHound — these are the real attack graph
+    # Vulnerable ACL paths for BloodHound -- these are the real attack graph
     Create-VulnerableACLs
 
     Show-ADCS-VulnerabilitySummary
@@ -1021,7 +1021,7 @@ function Create-GMSA {
                 -PrincipalsAllowedToRetrieveManagedPassword "kid.e" `
                 -ServicePrincipalNames "MSSQLSvc/sql01.$Global:Domain:1433" `
                 -ErrorAction Stop
-            Write-Good "gMSA 'gmsa_sql' created — kid.e can ReadGMSAPassword"
+            Write-Good "gMSA 'gmsa_sql' created -- kid.e can ReadGMSAPassword"
         }
     } catch {
         Write-Info "gMSA setup failed: $_"
@@ -1076,7 +1076,7 @@ function Create-CertifriedTemplate {
         $acl.AddAccessRule($ace)
         Set-Acl -AclObject $acl -Path "AD:$dn"
         certutil -SetCATemplates "+Certifried-Machine" 2>&1 | Out-Null
-        Write-Good "Certifried template published — Domain Computers can enroll"
+        Write-Good "Certifried template published -- Domain Computers can enroll"
     } catch {
         Write-Info "Certifried ACL/publish failed: $_"
     }

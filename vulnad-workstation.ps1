@@ -161,7 +161,7 @@ function Install-UnquotedServicePath {
     if (-not (Test-Path $svcDir)) {
         New-Item -ItemType Directory -Path $svcDir -Force | Out-Null
     }
-    # Stub exe — copy a benign system binary
+    # Stub exe -- copy a benign system binary
     Copy-Item "$env:WINDIR\System32\notepad.exe" $svcExe -Force
 
     # Make C:\Program Files writable by Authenticated Users (vuln)
@@ -271,7 +271,7 @@ function Configure-LAPSClient {
     # Trigger an initial rotation so password is in AD immediately
     try {
         Invoke-LapsPolicyProcessing -ErrorAction SilentlyContinue
-        Write-Good "LAPS policy applied — password backed up to AD"
+        Write-Good "LAPS policy applied -- password backed up to AD"
     } catch {
         Write-Info "Invoke-LapsPolicyProcessing not available (run gpupdate /force manually)"
     }
