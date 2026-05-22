@@ -212,19 +212,20 @@ function Create-BasicOUs {
         @{Name="Servers"; Path="DC=onepiece,DC=local"}
     )
     
+    $created = 0; $existed = 0
     foreach ($ou in $ous) {
         try {
-            $exists = Get-ADOrganizationalUnit -Filter "Name -eq '$($ou.Name)'" -ErrorAction SilentlyContinue
-            if (-not $exists) {
-                New-ADOrganizationalUnit -Name $ou.Name -Path $ou.Path -ProtectedFromAccidentalDeletion $false -ErrorAction SilentlyContinue
-                Write-Info "Created OU: $($ou.Name)"
+            if (Get-ADOrganizationalUnit -Filter "Name -eq '$($ou.Name)'" -ErrorAction SilentlyContinue) {
+                $existed++
             } else {
-                Write-Info "OU already exists: $($ou.Name)"
+                New-ADOrganizationalUnit -Name $ou.Name -Path $ou.Path -ProtectedFromAccidentalDeletion $false -ErrorAction SilentlyContinue
+                $created++
             }
         } catch {
             Write-Info "Error creating OU $($ou.Name): $_"
         }
     }
+    Write-Good "OUs: $created created, $existed existed"
 }
 
 function Import-OnePieceUsers {
@@ -286,17 +287,14 @@ function Import-OnePieceUsers {
                 
                 New-ADUser @userParams
                 $createdCount++
-                Write-Info "Created user: $($user.Username)"
-            } else {
-                Write-Info "User already exists: $($user.Username)"
             }
         } catch {
             $errorCount++
             Write-Info "Error creating user $($user.Username): $_"
         }
     }
-    
-    Write-Good "$createdCount users created ($errorCount errors)"
+
+    Write-Good "Users: $createdCount created, $($users.Count - $createdCount - $errorCount) existed, $errorCount errors"
     return $createdCount -gt 0
 }
 
@@ -321,10 +319,7 @@ function Move-UsersToOUs {
                 $adUser = Get-ADUser -Filter "SamAccountName -eq '$user'" -ErrorAction SilentlyContinue
                 if ($adUser) {
                     Move-ADObject -Identity $adUser.DistinguishedName -TargetPath $targetPath -ErrorAction SilentlyContinue
-                    Write-Info "Moved $user to $ou OU"
                     $movedCount++
-                } else {
-                    Write-Info "User not found: $user"
                 }
             } catch {
                 # FIXED LINE - use string formatting instead of colon
@@ -333,7 +328,7 @@ function Move-UsersToOUs {
         }
     }
     
-    Write-Info "Moved $movedCount users to OUs"
+    Write-Good "Moved $movedCount users to themed OUs"
     return $movedCount
 }
 
@@ -364,17 +359,15 @@ function Create-EssentialGroups {
                 $groupPath = if ($group.Path) { $group.Path } else { "DC=onepiece,DC=local" }
                 New-ADGroup -Name $group.Name -GroupScope $group.Scope -GroupCategory Security -Path $groupPath -ErrorAction SilentlyContinue
                 $createdCount++
-                Write-Info "Created group: $($group.Name) in $groupPath"
             } else {
                 $existingCount++
-                Write-Info "Group already exists: $($group.Name)"
             }
         } catch {
             Write-Info "Error creating group $($group.Name): $_"
         }
     }
     
-    Write-Good "$createdCount groups created ($existingCount already exist)"
+    Write-Good "Groups: $createdCount created, $existingCount existed"
     return $createdCount
 }
 
@@ -405,18 +398,12 @@ function Add-UsersToGroups {
             $usersToAdd = @()
             foreach ($user in $groupMappings[$group]) {
                 $adUser = Get-ADUser -Filter "SamAccountName -eq '$user'" -ErrorAction SilentlyContinue
-                if ($adUser) {
-                    $usersToAdd += $adUser.SamAccountName
-                } else {
-                    Write-Info "User not found for group membership: $user"
-                }
+                if ($adUser) { $usersToAdd += $adUser.SamAccountName }
             }
-            
+
             if ($usersToAdd.Count -gt 0) {
                 Add-ADGroupMember -Identity $group -Members $usersToAdd -ErrorAction SilentlyContinue
-                $addedCount = $usersToAdd.Count
-                $addedTotal += $addedCount
-                Write-Info "Added $addedCount users to $group"
+                $addedTotal += $usersToAdd.Count
             }
         } catch {
             # FIXED LINE
@@ -424,7 +411,7 @@ function Add-UsersToGroups {
         }
     }
     
-    Write-Info "Added $addedTotal total group memberships"
+    Write-Good "Group memberships added: $addedTotal"
     return $addedTotal
 }
 
@@ -497,14 +484,13 @@ function Create-ServiceAccounts {
                 
                 New-ADUser @userParams
                 $createdCount++
-                Write-Info "Created service account: $($svc.Name)"
             }
         } catch {
             Write-Info "Error creating service account $($svc.Name): $_"
         }
     }
     
-    Write-Info "Created $createdCount service accounts"
+    Write-Good "Service accounts: $createdCount created"
     return $createdCount
 }
 
@@ -520,7 +506,6 @@ function Configure-VulnerableAccounts {
             $adUser = Get-ADUser -Filter "SamAccountName -eq '$user'" -ErrorAction SilentlyContinue
             if ($adUser) {
                 Set-ADAccountControl -Identity $adUser.SamAccountName -DoesNotRequirePreAuth $true -ErrorAction SilentlyContinue
-                Write-Info "Configured DoesNotRequirePreAuth for $user"
                 $configuredCount++
             }
         } catch { 
@@ -536,7 +521,6 @@ function Configure-VulnerableAccounts {
             $adUser = Get-ADUser -Filter "SamAccountName -eq '$user'" -ErrorAction SilentlyContinue
             if ($adUser) {
                 Set-ADAccountControl -Identity $adUser.SamAccountName -TrustedForDelegation $true -ErrorAction SilentlyContinue
-                Write-Info "Configured TrustedForDelegation for $user"
                 $configuredCount++
             }
         } catch { 
@@ -545,7 +529,7 @@ function Configure-VulnerableAccounts {
         }
     }
     
-    Write-Info "Configured $configuredCount accounts for vulnerabilities"
+    Write-Good "Vulnerable accounts: $configuredCount configured (AS-REP + delegation)"
     return $configuredCount
 }
 
@@ -1369,7 +1353,7 @@ function Invoke-OnePieceSetup {
         foreach ($step in $steps) {
             Write-Host ""
             Write-Info "$($step.Name)..."
-            & $step.Action
+            & $step.Action | Out-Null
         }
         
         # Final Summary
