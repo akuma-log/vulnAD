@@ -184,7 +184,12 @@ function Import-OnePieceUsers {
         @{Username="shirahoshi"; FullName="Shirahoshi"; Password="Password444!"},
         @{Username="franky.c"; FullName="Cutty Flam"; Password="Password555!"},
         @{Username="brook.b"; FullName="Brook"; Password="Password666!"},
-        @{Username="bonclay.b"; FullName="Bon Clay"; Password="Password777!"}
+        @{Username="bonclay.b"; FullName="Bon Clay"; Password="Password777!"},
+        # Weak/reused passwords for spraying practice
+        @{Username="roger.g";    FullName="Gol D. Roger";   Password="Changeme123!"},
+        @{Username="rayleigh.s"; FullName="Silvers Rayleigh"; Password="Winter2023!"},
+        @{Username="garp.m";     FullName="Monkey D. Garp"; Password="Changeme123!"},
+        @{Username="smoker.c";   FullName="Smoker";         Password="Summer2024!"}
     )
     
     $createdCount = 0
@@ -311,7 +316,7 @@ function Add-UsersToGroups {
         "Marine Admirals" = @("akainu", "aokiji", "kizaru")
         "Pirate Emperors" = @("shanks.r", "kaido.b", "bigmom", "blackbeard")
         "Warlords of the Sea" = @("doflamingo", "law.t")
-        "Domain Admins" = @("luffy.m")
+        "Domain Admins" = @("luffy.m", "roger.g", "rayleigh.s")
         "Enterprise Admins" = @("luffy.m")
         "Schema Admins" = @("luffy.m")
         "DnsAdmins" = @("enel.g", "shirahoshi")
@@ -394,9 +399,12 @@ function Create-ServiceAccounts {
     Write-Info "Creating service accounts..."
     
     $services = @(
-        @{Name="merry_svc"; Description="Going Merry Service"; SPN="merry_svc/goingmerry.onepiece.local"},
-        @{Name="cifs_svc"; Description="CIFS Service"; SPN="cifs/dc.onepiece.local"},
-        @{Name="http_svc"; Description="HTTP Service"; SPN="http/web.onepiece.local"}
+        @{Name="merry_svc";    Description="Going Merry Service"; SPN="merry_svc/goingmerry.onepiece.local"; Password="Password123!"},
+        @{Name="cifs_svc";     Description="CIFS Service";        SPN="cifs/dc.onepiece.local";              Password="Password123!"},
+        @{Name="http_svc";     Description="HTTP Service";        SPN="http/web.onepiece.local";             Password="Password123!"},
+        @{Name="backup_svc";   Description="Backup Service";      SPN=$null;                                  Password="Backup123!"},
+        @{Name="helpdesk_svc"; Description="Helpdesk Service";    SPN=$null;                                  Password="Helpdesk2024!"},
+        @{Name="sql_svc";      Description="SQL Service";         SPN="MSSQLSvc/sql01.onepiece.local:1433";  Password="Sup3rS3cr3t!"}
     )
     
     $createdCount = 0
@@ -409,13 +417,13 @@ function Create-ServiceAccounts {
                     Name = $svc.Description
                     DisplayName = $svc.Description
                     SamAccountName = $svc.Name
-                    ServicePrincipalNames = $svc.SPN
-                    AccountPassword = (ConvertTo-SecureString "Password123!" -AsPlainText -Force)
+                    AccountPassword = (ConvertTo-SecureString $svc.Password -AsPlainText -Force)
                     Enabled = $true
                     PasswordNeverExpires = $true
                     Path = "OU=Services,DC=onepiece,DC=local"
                     ErrorAction = 'SilentlyContinue'
                 }
+                if ($svc.SPN) { $userParams['ServicePrincipalNames'] = $svc.SPN }
                 
                 New-ADUser @userParams
                 $createdCount++
@@ -637,11 +645,11 @@ function Install-ADCS {
             Write-Good "Certificate Authority already exists in AD"
         }
         
-        # Configure Web Enrollment
-        Write-Info "Configuring Web Enrollment Service..."
+        # Configure Web Enrollment (ESC8 - /certsrv NTLM relay target)
+        Write-Info "Configuring Web Enrollment (ESC8)..."
         try {
-            Install-AdcsEnrollmentWebService -ApplicationPoolIdentity -Force -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Good "Web Enrollment Service configured (ESC8 vulnerable)"
+            Install-AdcsWebEnrollment -Force -Confirm:$false -ErrorAction Stop
+            Write-Good "Web Enrollment configured at http://$env:COMPUTERNAME/certsrv (ESC8 vulnerable)"
         } catch {
             Write-Info "Web Enrollment may already be configured: $_"
         }
@@ -689,17 +697,17 @@ function Configure-ADCS-VulnerableSettings {
             Write-Info "Could not set CA registry flags (may need admin rights): $_"
         }
         
-        # ESC13: Set high machine account quota
-        Write-Info "Setting machine account quota for ESC13..."
+        # MachineAccountQuota: enables RBCD / shadow-credentials attacks from any domain user
+        Write-Info "Raising ms-DS-MachineAccountQuota for RBCD..."
         try {
             Set-ADDomain -Identity $Global:Domain -Replace @{"ms-DS-MachineAccountQuota" = "20"} -ErrorAction SilentlyContinue
-            Write-Info "Machine account quota set to 20"
+            Write-Info "MachineAccountQuota = 20 (default 10) — any user can join up to 20 machines"
         } catch {
             Write-Info "Could not set machine account quota: $_"
         }
-        
-        # ESC12: Ensure EFS is enabled
-        Write-Info "Configuring EFS for PetitPotam..."
+
+        # PetitPotam: EFS RPC server enabled for coerced auth
+        Write-Info "Ensuring EFS service is running (PetitPotam)..."
         try {
             Set-Service -Name EFS -StartupType Automatic -ErrorAction SilentlyContinue
             Start-Service -Name EFS -ErrorAction SilentlyContinue
@@ -727,138 +735,439 @@ function Configure-ADCS-VulnerableSettings {
     }
 }
 
-function Create-VulnerableCertificateTemplates {
-    Write-Info "Creating vulnerable certificate templates..."
-    
-    # Create template files directory
-    $templateDir = "C:\ADCS-Templates"
-    if (-not (Test-Path $templateDir)) {
-        New-Item -ItemType Directory -Path $templateDir -Force | Out-Null
+function New-VulnTemplateFromUser {
+    param(
+        [string]$NewName,
+        [int]$NameFlag,        # msPKI-Certificate-Name-Flag
+        [int]$EnrollmentFlag   # msPKI-Enrollment-Flag
+    )
+
+    $configNC = (Get-ADRootDSE).configurationNamingContext
+    $templatesPath = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNC"
+    $newDN = "CN=$NewName,$templatesPath"
+
+    if (Get-ADObject -Filter "Name -eq '$NewName'" -SearchBase $templatesPath -ErrorAction SilentlyContinue) {
+        Write-Info "Template $NewName already exists"
+        return
     }
-    
-    # ESC1: Vulnerable User template
-    $esc1Template = @"
-[Version]
-Signature="`$Windows NT`$"
 
-[NewRequest]
-Subject = "CN=ESC1-Vulnerable-User"
-KeyLength = 2048
-KeySpec = 1
-Exportable = TRUE
-MachineKeySet = FALSE
-RequestType = PKCS10
+    # Clone the built-in User template
+    $src = Get-ADObject -Identity "CN=User,$templatesPath" -Properties *
+    $attrs = @{
+        'flags'                              = $src.flags
+        'revision'                           = $src.revision
+        'pKIDefaultKeySpec'                  = $src.pKIDefaultKeySpec
+        'pKIMaxIssuingDepth'                 = $src.pKIMaxIssuingDepth
+        'pKICriticalExtensions'              = $src.pKICriticalExtensions
+        'pKIExpirationPeriod'                = $src.pKIExpirationPeriod
+        'pKIOverlapPeriod'                   = $src.pKIOverlapPeriod
+        'pKIExtendedKeyUsage'                = $src.pKIExtendedKeyUsage
+        'pKIDefaultCSPs'                     = $src.pKIDefaultCSPs
+        'msPKI-RA-Signature'                 = $src.'msPKI-RA-Signature'
+        'msPKI-Minimal-Key-Size'             = $src.'msPKI-Minimal-Key-Size'
+        'msPKI-Template-Schema-Version'      = 2
+        'msPKI-Template-Minor-Revision'      = 1
+        'msPKI-Cert-Template-OID'            = $src.'msPKI-Cert-Template-OID'
+        'msPKI-Certificate-Name-Flag'        = $NameFlag
+        'msPKI-Enrollment-Flag'              = $EnrollmentFlag
+        'msPKI-Private-Key-Flag'             = 0x10  # exportable
+        'msPKI-Certificate-Application-Policy' = '1.3.6.1.5.5.7.3.2'  # Client Auth
+    }
 
-[RequestAttributes]
-CertificateTemplate = "User"
-SAN="upn=administrator@$Global:Domain"
-"@
-    
-    $esc1Template | Out-File -FilePath "$templateDir\ESC1-Template.inf" -Encoding ASCII
-    
-    # ESC9: No-template-required certificate
-    $esc9Template = @"
-[Version]
-Signature="`$Windows NT`$"
+    try {
+        New-ADObject -Name $NewName -Type pKICertificateTemplate -Path $templatesPath -OtherAttributes $attrs -ErrorAction Stop
+        Write-Good "Created template $NewName in AD"
+    } catch {
+        Write-Info "Could not create template $NewName : $_"
+        return
+    }
 
-[NewRequest]
-Subject = "CN=ESC9-No-Template"
-KeyLength = 2048
-KeySpec = 1
-Exportable = TRUE
-"@
-    
-    $esc9Template | Out-File -FilePath "$templateDir\ESC9-Template.inf" -Encoding ASCII
-    
-    Write-Info "Vulnerable certificate templates created in $templateDir"
-    Write-Info "Note: Templates may need manual configuration in Certificate Templates console"
+    # Grant Domain Users the Enroll right (extended right on the template object)
+    try {
+        $du = (Get-ADGroup "Domain Users").SID
+        $enrollRightGuid = [GUID]'0e10c968-78fb-11d2-90d4-00c04f79dc55'  # Certificate-Enrollment
+        $acl = Get-Acl "AD:$newDN"
+        $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule(
+            $du, 'ExtendedRight', 'Allow', $enrollRightGuid
+        )
+        $acl.AddAccessRule($ace)
+        Set-Acl -AclObject $acl -Path "AD:$newDN"
+        Write-Info "Granted Domain Users Enroll on $NewName"
+    } catch {
+        Write-Info "ACL set failed on $NewName : $_"
+    }
+
+    # Publish template on the CA
+    try {
+        certutil -SetCATemplates "+$NewName" 2>&1 | Out-Null
+        Write-Info "Published $NewName on CA"
+    } catch {
+        Write-Info "certutil publish failed for $NewName : $_"
+    }
+}
+
+function Create-VulnerableCertificateTemplates {
+    Write-Info "Publishing vulnerable certificate templates to AD..."
+
+    # ESC1: ENROLLEE_SUPPLIES_SUBJECT (1) + Client Auth EKU + low-priv enroll
+    # msPKI-Certificate-Name-Flag = 0x00000001 (CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT)
+    New-VulnTemplateFromUser -NewName "ESC1-VulnUser" -NameFlag 0x1 -EnrollmentFlag 0
+
+    # ESC9: NO_SECURITY_EXTENSION on enrollment flag (0x80000)
+    # Subject taken from AD = vulnerable to UPN-spoof + weak mapping
+    New-VulnTemplateFromUser -NewName "ESC9-NoSecExt" -NameFlag 0x0 -EnrollmentFlag 0x80000
+
+    # ESC15 / EKUwu: schema v1 template with ENROLLEE_SUPPLIES_SUBJECT (we
+    # write schema v2 here but with editable subject — gives a similar primitive)
+    New-VulnTemplateFromUser -NewName "ESC15-Editable" -NameFlag 0x1 -EnrollmentFlag 0
+
+    Write-Good "Vulnerable templates published: ESC1-VulnUser, ESC9-NoSecExt, ESC15-Editable"
 }
 
 function Configure-ADCS-AdvancedVulns {
-    Write-Info "Configuring additional AD CS vulnerabilities (ESC9-ESC16)..."
-    
+    Write-Info "Configuring additional AD CS vulnerabilities..."
+
+    # ESC10: Weak certificate mapping on the DC.
+    # CertificateMappingMethods = 0x1F (all weak methods enabled, including UPN)
+    # StrongCertificateBindingEnforcement = 0 (no enforcement)
+    Write-Info "ESC10: weakening Kerberos cert mapping on DC..."
     try {
-        # ESC10: Create Certificate Manager account
-        Write-Info "Creating vulnerable Certificate Manager account..."
+        $kdc = "HKLM:\SYSTEM\CurrentControlSet\Services\Kdc"
+        $schan = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL"
+        New-Item -Path $kdc -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-ItemProperty -Path $kdc -Name "StrongCertificateBindingEnforcement" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $schan -Name "CertificateMappingMethods" -Value 0x1F -Type DWord -ErrorAction SilentlyContinue
+        Write-Good "ESC10 weak mapping configured"
+    } catch { Write-Info "ESC10 reg write failed: $_" }
+
+    # ESC16: Disable szOID_NTDS_CA_SECURITY_EXT on the CA so all issued certs
+    # lack the SID binding extension (domain-wide bypass).
+    Write-Info "ESC16: disabling Security Extension on CA..."
+    try {
+        certutil -setreg policy\DisableExtensionList "+1.3.6.1.4.1.311.25.2" 2>&1 | Out-Null
+        Restart-Service certsvc -Force -ErrorAction SilentlyContinue
+        Write-Good "ESC16: szOID_NTDS_CA_SECURITY_EXT disabled CA-wide"
+    } catch { Write-Info "ESC16 setreg failed: $_" }
+
+    # Vulnerable ACL paths for BloodHound — these are the real attack graph
+    Create-VulnerableACLs
+
+    Show-ADCS-VulnerabilitySummary
+    Write-Good "Advanced vulnerabilities configured"
+}
+
+function Create-VulnerableACLs {
+    Write-Info "Creating vulnerable ACL attack paths (BloodHound bait)..."
+
+    # Map: principal granted right -> (right, target object)
+    # Picks scenarios that produce classic BloodHound edges.
+    $paths = @(
+        @{ Who='zoro.r';    Right='GenericAll';        Target='nami.n';     TargetType='User'  },
+        @{ Who='sanji.v';   Right='ForceChangePassword'; Target='usopp.u';  TargetType='User'  },
+        @{ Who='law.t';     Right='WriteDACL';         Target='Warlords of the Sea'; TargetType='Group' },
+        @{ Who='kid.e';     Right='GenericWrite';      Target='Supernovas'; TargetType='Group' },
+        @{ Who='doflamingo';Right='WriteOwner';        Target='shirahoshi'; TargetType='User'  }
+    )
+
+    foreach ($p in $paths) {
         try {
-            $certManager = @{
-                Name = "Certificate Manager"
-                SamAccountName = "certmanager"
-                Description = "Certificate Management Account"
-                AccountPassword = (ConvertTo-SecureString "CertMgr123!" -AsPlainText -Force)
-                Enabled = $true
-                PasswordNeverExpires = $true
-                Path = "OU=Services,DC=onepiece,DC=local"
+            $whoSid = (Get-ADUser -Identity $p.Who).SID
+            if ($p.TargetType -eq 'User') {
+                $targetDN = (Get-ADUser -Identity $p.Target).DistinguishedName
+            } else {
+                $targetDN = (Get-ADGroup -Identity $p.Target).DistinguishedName
             }
-            
-            New-ADUser @certManager -ErrorAction SilentlyContinue
-            Write-Info "Created certificate manager account"
-        } catch { }
-        
-        # ESC11: Already configured via enel.g in DnsAdmins
-        
-        # ESC14: Create backup service account
-        Write-Info "Creating backup service account..."
-        try {
-            $backupSvc = @{
-                Name = "Backup Operator"
-                SamAccountName = "backup_svc"
-                Description = "Backup Service Account"
-                AccountPassword = (ConvertTo-SecureString "Backup123!" -AsPlainText -Force)
-                Enabled = $true
-                PasswordNeverExpires = $true
-                Path = "OU=Services,DC=onepiece,DC=local"
+
+            $acl = Get-Acl -Path "AD:$targetDN"
+
+            switch ($p.Right) {
+                'GenericAll' {
+                    $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule(
+                        $whoSid, 'GenericAll', 'Allow')
+                }
+                'GenericWrite' {
+                    $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule(
+                        $whoSid, 'GenericWrite', 'Allow')
+                }
+                'WriteDACL' {
+                    $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule(
+                        $whoSid, 'WriteDacl', 'Allow')
+                }
+                'WriteOwner' {
+                    $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule(
+                        $whoSid, 'WriteOwner', 'Allow')
+                }
+                'ForceChangePassword' {
+                    # Extended right: User-Force-Change-Password
+                    $guid = [GUID]'00299570-246d-11d0-a768-00aa006e0529'
+                    $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule(
+                        $whoSid, 'ExtendedRight', 'Allow', $guid)
+                }
             }
-            
-            New-ADUser @backupSvc -ErrorAction SilentlyContinue
-            Add-ADGroupMember -Identity "Backup Operators" -Members "backup_svc" -ErrorAction SilentlyContinue
-            Write-Info "Created backup service account"
-        } catch { }
-        
-        # ESC15: Create test computer for RBCD
-        Write-Info "Creating test computer for RBCD..."
-        try {
-            $testComputer = Get-ADComputer -Filter "Name -eq 'TESTCOMP'" -ErrorAction SilentlyContinue
-            if (-not $testComputer) {
-                New-ADComputer -Name "TESTCOMP" -SamAccountName "TESTCOMP`$" -Path "OU=Workstations,DC=onepiece,DC=local" -Enabled $true -ErrorAction SilentlyContinue
-                Write-Info "Created test computer: TESTCOMP"
-            }
-        } catch { }
-        
-        # ESC16: Smartcard configuration
-        Write-Info "Configuring smartcard authentication..."
-        try {
-            Set-ADDomain -Identity $Global:Domain -Replace @{
-                "msDS-Other-Settings" = "RequireSmartCard=0"
-            } -ErrorAction SilentlyContinue
-        } catch { }
-        
-        # Create vulnerability summary
-        Show-ADCS-VulnerabilitySummary
-        
-        Write-Good "Advanced AD CS vulnerabilities configured"
-        
+
+            $acl.AddAccessRule($ace)
+            Set-Acl -AclObject $acl -Path "AD:$targetDN"
+            Write-Info "  $($p.Who) -[$($p.Right)]-> $($p.Target)"
+        } catch {
+            Write-Info "  Failed $($p.Who) -> $($p.Target) : $_"
+        }
+    }
+
+    # DCSync rights for a non-DA user (classic BloodHound DCSync edge)
+    try {
+        $domainDN = (Get-ADDomain).DistinguishedName
+        $acl = Get-Acl -Path "AD:$domainDN"
+        $sid = (Get-ADUser bonclay.b).SID
+        # DS-Replication-Get-Changes
+        $g1 = [GUID]'1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'
+        # DS-Replication-Get-Changes-All
+        $g2 = [GUID]'1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'
+        foreach ($g in @($g1, $g2)) {
+            $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule(
+                $sid, 'ExtendedRight', 'Allow', $g)
+            $acl.AddAccessRule($ace)
+        }
+        Set-Acl -AclObject $acl -Path "AD:$domainDN"
+        Write-Good "Granted DCSync rights to bonclay.b"
     } catch {
-        Write-Info "Error in advanced vulnerability configuration: $_"
+        Write-Info "DCSync ACL grant failed: $_"
     }
 }
 
 function Show-ADCS-VulnerabilitySummary {
-    Write-Host "`n" -ForegroundColor Green
+    Write-Host ""
     Write-Host "AD CS VULNERABILITIES CONFIGURED" -ForegroundColor Green
     Write-Host "==============================================" -ForegroundColor Green
-    Write-Host "ESC1-ESC2: Vulnerable User template created" -ForegroundColor Yellow
-    Write-Host "ESC5-ESC6: EDITF_ATTRIBUTESUBJECT enabled" -ForegroundColor Yellow
-    Write-Host "ESC8: Web Enrollment enabled (http://$env:COMPUTERNAME/certsrv)" -ForegroundColor Yellow
-    Write-Host "ESC9: No-template-required certificate template" -ForegroundColor Yellow
-    Write-Host "ESC10: Certificate Manager account created" -ForegroundColor Yellow
-    Write-Host "ESC11: DnsAdmins AD CS (via enel.g)" -ForegroundColor Yellow
-    Write-Host "ESC12: EFS enabled for PetitPotam" -ForegroundColor Yellow
-    Write-Host "ESC13: Machine account quota set to 20" -ForegroundColor Yellow
-    Write-Host "ESC14: Backup service account created" -ForegroundColor Yellow
-    Write-Host "ESC15: RBCD test computer created" -ForegroundColor Yellow
-    Write-Host "ESC16: Smartcard authentication configured" -ForegroundColor Yellow
+    Write-Host "ESC1 : Template 'ESC1-VulnUser' (ENROLLEE_SUPPLIES_SUBJECT + Client Auth, Domain Users can enroll)" -ForegroundColor Yellow
+    Write-Host "ESC6 : EDITF_ATTRIBUTESUBJECT enabled on CA" -ForegroundColor Yellow
+    Write-Host "ESC8 : Web Enrollment at http://$env:COMPUTERNAME/certsrv (NTLM relay target)" -ForegroundColor Yellow
+    Write-Host "ESC9 : Template 'ESC9-NoSecExt' (CT_FLAG_NO_SECURITY_EXTENSION)" -ForegroundColor Yellow
+    Write-Host "ESC10: Weak cert mapping on DC (StrongCertificateBindingEnforcement=0)" -ForegroundColor Yellow
+    Write-Host "ESC15: Template 'ESC15-Editable' (editable subject)" -ForegroundColor Yellow
+    Write-Host "ESC16: szOID_NTDS_CA_SECURITY_EXT disabled CA-wide" -ForegroundColor Yellow
+    Write-Host "PetitPotam: EFS service running, SMB signing disabled" -ForegroundColor Yellow
     Write-Host ""
+}
+
+# ============================================
+# V2: HIGH/MEDIUM VALUE VULN ADDITIONS
+# ============================================
+
+function Configure-ConstrainedDelegation {
+    Write-Info "Configuring constrained delegation on nami.n..."
+    try {
+        Set-ADUser -Identity nami.n -Add @{
+            'msDS-AllowedToDelegateTo' = @("CIFS/DC01.$Global:Domain","CIFS/DC01")
+        } -ErrorAction Stop
+        # protocol transition (TRUSTED_TO_AUTH_FOR_DELEGATION) -> S4U2Self abuse
+        Set-ADAccountControl -Identity nami.n -TrustedToAuthForDelegation $true -ErrorAction SilentlyContinue
+        Write-Good "nami.n: constrained delegation to CIFS/DC01 (with protocol transition)"
+    } catch {
+        Write-Info "Constrained delegation failed: $_"
+    }
+}
+
+function Configure-RBCD {
+    Write-Info "Pre-staging RBCD attack scenario..."
+    try {
+        $tgt = Get-ADComputer -Filter "Name -eq 'FILES01'" -ErrorAction SilentlyContinue
+        if (-not $tgt) {
+            New-ADComputer -Name "FILES01" -SamAccountName "FILES01`$" `
+                -Path "OU=Servers,DC=onepiece,DC=local" -Enabled $true -ErrorAction Stop
+            Write-Info "Created FILES01 computer object"
+        }
+        $usopp = Get-ADUser usopp.u
+        Set-ADComputer -Identity FILES01 -PrincipalsAllowedToDelegateToAccount $usopp -ErrorAction Stop
+        Write-Good "RBCD: usopp.u -> FILES01 (s4u2proxy abuse)"
+    } catch {
+        Write-Info "RBCD pre-stage failed: $_"
+    }
+}
+
+function Install-LAPSOnDC {
+    Write-Info "Installing Windows LAPS..."
+    try {
+        if (-not (Get-Command Update-LapsADSchema -ErrorAction SilentlyContinue)) {
+            Write-Info "LAPS cmdlets unavailable. Install RSAT-AD-PowerShell + Windows LAPS module."
+            return
+        }
+        Update-LapsADSchema -Confirm:$false -ErrorAction Stop
+        Write-Good "LAPS schema extended"
+
+        Set-LapsADComputerSelfPermission -Identity "OU=Workstations,DC=onepiece,DC=local" -ErrorAction SilentlyContinue
+        Set-LapsADReadPasswordPermission -Identity "OU=Workstations,DC=onepiece,DC=local" -AllowedPrincipals kid.e -ErrorAction SilentlyContinue
+        Write-Good "kid.e granted ReadLAPSPassword on OU=Workstations"
+
+        # Push policy so domain workstations rotate local admin via LAPS
+        $polKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\LAPS\Config"
+        New-Item -Path $polKey -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-ItemProperty -Path $polKey -Name "BackupDirectory" -Value 2 -Type DWord -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $polKey -Name "PasswordComplexity" -Value 4 -Type DWord -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $polKey -Name "PasswordLength" -Value 14 -Type DWord -ErrorAction SilentlyContinue
+    } catch {
+        Write-Info "LAPS configure failed: $_"
+    }
+}
+
+function Create-GMSA {
+    Write-Info "Setting up gMSA with ReadGMSAPassword edge..."
+    try {
+        if (-not (Get-KdsRootKey -ErrorAction SilentlyContinue)) {
+            Add-KdsRootKey -EffectiveTime ((Get-Date).AddHours(-10)) | Out-Null
+            Write-Info "KDS root key created (effective immediately)"
+        }
+        if (-not (Get-ADServiceAccount -Filter "Name -eq 'gmsa_sql'" -ErrorAction SilentlyContinue)) {
+            New-ADServiceAccount -Name "gmsa_sql" -DNSHostName "gmsa_sql.$Global:Domain" `
+                -PrincipalsAllowedToRetrieveManagedPassword "kid.e" `
+                -ServicePrincipalNames "MSSQLSvc/sql01.$Global:Domain:1433" `
+                -ErrorAction Stop
+            Write-Good "gMSA 'gmsa_sql' created — kid.e can ReadGMSAPassword"
+        }
+    } catch {
+        Write-Info "gMSA setup failed: $_"
+    }
+}
+
+function Enable-LDAPAnonymousBind {
+    Write-Info "Enabling LDAP anonymous bind + Pre-Win2000 compat..."
+    try {
+        $configNC = (Get-ADRootDSE).configurationNamingContext
+        $dsh = "CN=Directory Service,CN=Windows NT,CN=Services,$configNC"
+        $current = (Get-ADObject -Identity $dsh -Properties dsHeuristics).dsHeuristics
+        if (-not $current) { $current = "" }
+        while ($current.Length -lt 7) { $current += "0" }
+        $chars = $current.ToCharArray()
+        $chars[6] = '2'
+        Set-ADObject -Identity $dsh -Replace @{dsHeuristics = (-join $chars)}
+        Write-Good "dsHeuristics: anonymous LDAP bind enabled"
+
+        Add-ADGroupMember -Identity "Pre-Windows 2000 Compatible Access" -Members "Authenticated Users" -ErrorAction SilentlyContinue
+        Write-Good "Authenticated Users -> Pre-Windows 2000 Compatible Access"
+    } catch {
+        Write-Info "LDAP anon / Pre-Win2K failed: $_"
+    }
+}
+
+function Create-ADIDNSWildcard {
+    Write-Info "Creating ADIDNS wildcard record..."
+    try {
+        $dcIP = (Get-NetIPAddress -AddressFamily IPv4 |
+                 Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -ne '127.0.0.1' } |
+                 Select-Object -First 1).IPAddress
+        Add-DnsServerResourceRecordA -Name "*" -ZoneName $Global:Domain -IPv4Address $dcIP -ErrorAction SilentlyContinue
+        Write-Good "Wildcard A record '*.$Global:Domain' -> $dcIP"
+    } catch {
+        Write-Info "ADIDNS wildcard failed: $_"
+    }
+}
+
+function Create-CertifriedTemplate {
+    Write-Info "Publishing Certifried (CVE-2022-26923) template..."
+    # Subject from AD + missing SID extension on machine cert
+    New-VulnTemplateFromUser -NewName "Certifried-Machine" -NameFlag 0x0 -EnrollmentFlag 0x80000
+
+    try {
+        $configNC = (Get-ADRootDSE).configurationNamingContext
+        $dn = "CN=Certifried-Machine,CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNC"
+        $sid = (Get-ADGroup "Domain Computers").SID
+        $enrollGuid = [GUID]'0e10c968-78fb-11d2-90d4-00c04f79dc55'
+        $acl = Get-Acl "AD:$dn"
+        $ace = New-Object DirectoryServices.ActiveDirectoryAccessRule($sid, 'ExtendedRight', 'Allow', $enrollGuid)
+        $acl.AddAccessRule($ace)
+        Set-Acl -AclObject $acl -Path "AD:$dn"
+        certutil -SetCATemplates "+Certifried-Machine" 2>&1 | Out-Null
+        Write-Good "Certifried template published — Domain Computers can enroll"
+    } catch {
+        Write-Info "Certifried ACL/publish failed: $_"
+    }
+}
+
+function Enable-PrintSpoolerOnDC {
+    Write-Info "Ensuring Print Spooler running on DC (PrinterBug / MS-RPRN)..."
+    try {
+        Set-Service -Name Spooler -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name Spooler -ErrorAction SilentlyContinue
+        Write-Good "Spooler running on DC"
+    } catch {
+        Write-Info "Spooler start failed: $_"
+    }
+}
+
+function Create-GPPCpassword {
+    Write-Info "Planting GPP cpassword in SYSVOL..."
+    try {
+        Import-Module GroupPolicy -ErrorAction Stop
+        $gpoName = "OnePiece-Workstation-Policy"
+        $gpo = Get-GPO -Name $gpoName -ErrorAction SilentlyContinue
+        if (-not $gpo) {
+            $gpo = New-GPO -Name $gpoName -ErrorAction Stop
+            New-GPLink -Name $gpoName -Target "OU=Workstations,DC=onepiece,DC=local" -ErrorAction SilentlyContinue
+            Write-Info "Created GPO $gpoName, linked to OU=Workstations"
+        }
+
+        $gpoGuid = $gpo.Id.ToString("B").ToUpper()
+        $gppDir = "\\$env:COMPUTERNAME\SYSVOL\$Global:Domain\Policies\$gpoGuid\Machine\Preferences\Groups"
+        if (-not (Test-Path $gppDir)) {
+            New-Item -ItemType Directory -Path $gppDir -Force | Out-Null
+        }
+
+        # The infamous public AES key cpassword - decrypts to "Local*P4ss!"
+        $cpassword = "j1Uyj3Vx8TY9LtLZil2uAuZkFQA/4latT76ZwgdHdhw"
+        $xml = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Groups clsid="{3125E937-EB16-4b4c-9934-544FC6D24D26}">
+  <User clsid="{DF5F1855-51E5-4d24-8B1A-D9BDE98BA1D1}"
+        name="LocalAdmin" image="2" changed="2024-01-01 00:00:00"
+        uid="{B5E5BF10-F0A0-4F2D-9F2A-9F1F2F3F4F5F}">
+    <Properties action="C" fullName="" description="Local admin"
+        cpassword="$cpassword" changeLogon="0" noChange="0"
+        neverExpires="0" acctDisabled="0" subAuthority="" userName="LocalAdmin"/>
+  </User>
+</Groups>
+"@
+        $xml | Out-File -FilePath "$gppDir\Groups.xml" -Encoding UTF8 -Force
+        Write-Good "GPP Groups.xml planted (cpassword decryptable -> Local*P4ss!)"
+    } catch {
+        Write-Info "GPP cpassword plant failed: $_"
+    }
+}
+
+function Create-FileShareLoot {
+    Write-Info "Creating loot SMB share..."
+    try {
+        $sharePath = "C:\Shares\Public"
+        if (-not (Test-Path $sharePath)) {
+            New-Item -ItemType Directory -Path $sharePath -Force | Out-Null
+        }
+
+        @"
+:: Backup script - DO NOT DISTRIBUTE
+@echo off
+net use Z: \\dc01\backup /user:onepiece\backup_svc Backup123!
+robocopy C:\Important Z:\ /MIR
+"@ | Out-File -FilePath "$sharePath\backup.bat" -Encoding ASCII -Force
+
+        @"
+# Helpdesk remote-fix script
+`$password = ConvertTo-SecureString 'Helpdesk2024!' -AsPlainText -Force
+`$cred = New-Object PSCredential('onepiece\helpdesk_svc', `$password)
+Invoke-Command -ComputerName WS01 -Credential `$cred -ScriptBlock { whoami }
+"@ | Out-File -FilePath "$sharePath\fix-ws01.ps1" -Encoding UTF8 -Force
+
+        @"
+Database connection string:
+Server=sql01.onepiece.local;Database=master;User Id=sa;Password=Sup3rS3cr3t!;
+
+Linked server SQL01 -> DC01 (executes as onepiece\sql_svc)
+"@ | Out-File -FilePath "$sharePath\db-conn.txt" -Encoding ASCII -Force
+
+        if (-not (Get-SmbShare -Name "Public" -ErrorAction SilentlyContinue)) {
+            New-SmbShare -Name "Public" -Path $sharePath -ReadAccess "Authenticated Users" | Out-Null
+        }
+        Write-Good "Share \\$env:COMPUTERNAME\Public created with loot files"
+    } catch {
+        Write-Info "Loot share failed: $_"
+    }
 }
 
 # ============================================
@@ -928,7 +1237,18 @@ function Invoke-OnePieceSetup {
             @{Name="Creating Service Accounts"; Action={Create-ServiceAccounts}},
             @{Name="Configuring Vulnerabilities"; Action={Configure-VulnerableAccounts}},
             @{Name="Configuring SMB Settings"; Action={Configure-SMB}},
+            @{Name="Creating Vulnerable ACL Paths"; Action={Create-VulnerableACLs}},
+            @{Name="Constrained Delegation (nami.n)"; Action={Configure-ConstrainedDelegation}},
+            @{Name="RBCD Pre-stage (usopp.u -> FILES01)"; Action={Configure-RBCD}},
+            @{Name="Installing LAPS"; Action={Install-LAPSOnDC}},
+            @{Name="Creating gMSA"; Action={Create-GMSA}},
+            @{Name="LDAP Anonymous Bind + Pre-Win2K"; Action={Enable-LDAPAnonymousBind}},
+            @{Name="ADIDNS Wildcard"; Action={Create-ADIDNSWildcard}},
+            @{Name="Print Spooler on DC"; Action={Enable-PrintSpoolerOnDC}},
+            @{Name="GPP cpassword in SYSVOL"; Action={Create-GPPCpassword}},
+            @{Name="File Share Loot"; Action={Create-FileShareLoot}},
             @{Name="Installing AD CS"; Action={Install-ADCS}},
+            @{Name="Certifried Template"; Action={Create-CertifriedTemplate}},
             @{Name="Configuring Advanced AD CS Vulns"; Action={Configure-ADCS-AdvancedVulns}}
         )
         
